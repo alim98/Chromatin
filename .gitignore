@@ -1,0 +1,104 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Distribution / packaging
+.Python
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Project specific
+# Uncomment the following line if you don't want to track data files
+# data/
+# Large data files
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Result files
+results/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.pydevproject
+.settings/
+
+# Logs
+*.log
+logs/ 
+# Data folder
+data/
+# add all folders in data/ to the gitignore
+data/*
+
+model/hemibrain_production.checkpoint
+
+# ignore all files in analysis_output/
+analysis_output/*
+
+# ignore all files in results/
+results/*
+
+# ignore all files in logs/
+logs/*  
+
+
+
+
