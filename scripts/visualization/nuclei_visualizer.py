@@ -24,6 +24,7 @@ from IPython.display import HTML, display
 import glob
 from tqdm import tqdm  # Import tqdm for progress bars
 import gc  # Import garbage collector
+import time
 
 # Add parent directory to path to import from dataloader and config
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -183,24 +184,50 @@ class VolumeGifCreator:
         from PIL import Image
         import numpy as np
         
+        # Track execution time
+        start_time = time.time()
+        
+        # Track memory usage if possible
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            memory_before = process.memory_info().rss / 1024 / 1024  # Convert to MB
+            print(f"Memory usage before GIF creation: {memory_before:.1f} MB")
+            memory_tracking = True
+        except ImportError:
+            memory_tracking = False
+            print("Memory tracking disabled (psutil not available)")
+        
         # Create temporary directory for frames
         tmp_dir = os.path.join(self.output_dir, 'tmp_frames')
         os.makedirs(tmp_dir, exist_ok=True)
+        
+        # Create directory for stats
+        stats_dir = os.path.join(self.output_dir, 'stats')
+        os.makedirs(stats_dir, exist_ok=True)
         
         all_frame_paths = []
         
         try:
             # Process frames in batches
             num_batches = (len(image_files) + self.batch_size - 1) // self.batch_size
+            total_images = len(image_files)
+            
+            print(f"\n=== GIF Creation Process ===")
+            print(f"[1/4] Creating frames from {total_images} images in {num_batches} batches")
+            print(f"      Batch size: {self.batch_size}, DPI: {self.dpi}, Figure size: {self.figsize}")
+            
+            # Create a progress bar for the overall batch processing
+            batch_pbar = tqdm(total=num_batches, desc="Processing batches", unit="batch")
             
             for batch_idx in range(num_batches):
                 start_idx = batch_idx * self.batch_size
                 end_idx = min(start_idx + self.batch_size, len(image_files))
                 
-                print(f"Processing batch {batch_idx+1}/{num_batches} (frames {start_idx+1}-{end_idx})...")
+                batch_pbar.set_description(f"Batch {batch_idx+1}/{num_batches} (frames {start_idx+1}-{end_idx})")
                 
                 # Process current batch
-                for i in tqdm(range(start_idx, end_idx), desc=f"Creating frames (batch {batch_idx+1})"):
+                for i in tqdm(range(start_idx, end_idx), desc=f"Creating frames", unit="frame", leave=False):
                     # Load image
                     img = self._load_image(image_files[i])
                     
@@ -238,29 +265,53 @@ class VolumeGifCreator:
                 
                 # Force garbage collection between batches
                 gc.collect()
+                
+                # Check memory usage
+                if memory_tracking:
+                    memory_current = process.memory_info().rss / 1024 / 1024
+                    memory_delta = memory_current - memory_before
+                    print(f"Memory after batch {batch_idx+1}: {memory_current:.1f} MB (Δ: {memory_delta:+.1f} MB)")
+                
+                # Update batch progress
+                batch_pbar.update(1)
             
-            # Create GIF using PIL
-            gif_path = os.path.join(self.output_dir, output_filename)
+            # Close the batch progress bar
+            batch_pbar.close()
             
             if not all_frame_paths:
-                print("Error: No frames were created")
+                print("❌ Error: No frames were created")
                 return None
                 
-            print(f"Creating GIF with {len(all_frame_paths)} frames...")
+            # Report frame creation completion and timing
+            frame_time = time.time() - start_time
+            print(f"✅ Created {len(all_frame_paths)} frames in {frame_time:.1f} seconds")
+            
+            print(f"\n[2/4] Reading frames and creating GIF")
+            
+            # Check frame file sizes
+            total_frame_size = sum(os.path.getsize(f) for f in all_frame_paths) / 1024  # KB
+            print(f"      Total frame size: {total_frame_size:.1f} KB")
+            
+            # Path for the output GIF
+            gif_path = os.path.join(self.output_dir, output_filename)
             
             # Load frames and create GIF
             frames = []
-            for frame_path in tqdm(all_frame_paths, desc="Processing frames"):
+            print(f"      Reading {len(all_frame_paths)} frames into memory...")
+            for frame_path in tqdm(all_frame_paths, desc="Reading frames", unit="frame"):
                 try:
                     frame = Image.open(frame_path)
                     frames.append(frame.copy())
                     frame.close()
                 except Exception as e:
-                    print(f"  Error processing frame {frame_path}: {e}")
+                    print(f"  ❌ Error processing frame {frame_path}: {e}")
             
             if frames:
-                print(f"Saving GIF to {gif_path}...")
-                with tqdm(total=1, desc="Saving GIF") as pbar:
+                print(f"\n[3/4] Saving GIF to {gif_path}")
+                print(f"      Duration: {duration}ms per frame, Total frames: {len(frames)}")
+                
+                with tqdm(total=1, desc="Creating GIF file") as pbar:
+                    save_start = time.time()
                     frames[0].save(
                         gif_path,
                         save_all=True,
@@ -269,39 +320,76 @@ class VolumeGifCreator:
                         duration=duration,
                         loop=0
                     )
+                    save_time = time.time() - save_start
                     pbar.update(1)
                 
-                gif_size = os.path.getsize(gif_path) / 1024  # KB
-                print(f"Created GIF: {gif_path} ({gif_size:.1f} KB)")
-                return gif_path
+                # Check if the GIF was created and report its size
+                if os.path.exists(gif_path):
+                    gif_size = os.path.getsize(gif_path) / 1024  # KB
+                    print(f"✅ GIF created: {gif_path}")
+                    print(f"   - Size: {gif_size:.1f} KB")
+                    print(f"   - Save time: {save_time:.1f} seconds")
+                    
+                    # Save a summary of the GIF creation
+                    try:
+                        with open(os.path.join(stats_dir, f"{output_filename}_stats.txt"), 'w') as f:
+                            f.write(f"GIF Creation Summary for {output_filename}\n")
+                            f.write(f"======================================\n")
+                            f.write(f"Total frames: {len(frames)}\n")
+                            f.write(f"Frame size: {self.figsize}, DPI: {self.dpi}\n")
+                            f.write(f"Total frame size: {total_frame_size:.1f} KB\n")
+                            f.write(f"GIF size: {gif_size:.1f} KB\n")
+                            f.write(f"Compression ratio: {total_frame_size/gif_size:.1f}x\n")
+                            f.write(f"Duration per frame: {duration}ms\n")
+                            f.write(f"Total creation time: {time.time() - start_time:.1f} seconds\n")
+                    except Exception as e:
+                        print(f"Warning: Could not save statistics: {e}")
+                    
+                    return gif_path
+                else:
+                    print(f"❌ Error: GIF file was not created at {gif_path}")
+                    return None
             else:
-                print("Error: No frames could be processed")
+                print("❌ Error: No frames could be processed")
                 return None
                 
         except Exception as e:
-            print(f"Error creating GIF: {e}")
+            print(f"❌ Error creating GIF: {e}")
             import traceback
             traceback.print_exc()
             return None
         finally:
             # Clean up temporary frames
-            print("Cleaning up temporary files...")
-            for frame_path in all_frame_paths:
+            print(f"\n[4/4] Cleaning up temporary files")
+            deleted_count = 0
+            for frame_path in tqdm(all_frame_paths, desc="Removing temporary files", unit="file"):
                 try:
                     if os.path.exists(frame_path):
                         os.remove(frame_path)
+                        deleted_count += 1
                 except Exception:
                     pass
+            
+            print(f"      Removed {deleted_count} of {len(all_frame_paths)} temporary files")
                     
             # Try to remove temporary directory
             try:
                 if os.path.exists(tmp_dir):
                     os.rmdir(tmp_dir)
+                    print(f"      Removed temporary directory {tmp_dir}")
             except Exception:
-                pass
-                
-            print("=== GIF Creation Complete ===\n")
+                print(f"      Could not remove temporary directory {tmp_dir}")
             
+            # Final memory stats
+            if memory_tracking:
+                memory_final = process.memory_info().rss / 1024 / 1024
+                print(f"\nFinal memory usage: {memory_final:.1f} MB (Δ: {memory_final - memory_before:+.1f} MB)")
+                
+            # Total time
+            total_time = time.time() - start_time
+            print(f"Total processing time: {total_time:.1f} seconds")    
+            print("=== GIF Creation Complete ===\n")
+    
     def _load_image(self, image_path):
         """Load an image file and convert to numpy array."""
         from PIL import Image
