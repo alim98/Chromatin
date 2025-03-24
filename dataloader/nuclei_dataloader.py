@@ -102,6 +102,7 @@ class NucleiDataset(Dataset):
                  ignore_unclassified=True,
                  load_volumes=False,
                  max_crops_per_volume=8,
+                 target_size=(80, 80, 80),
                  debug=False):
         """
         Args:
@@ -116,6 +117,7 @@ class NucleiDataset(Dataset):
             ignore_unclassified (bool): Whether to ignore unclassified samples.
             load_volumes (bool): Whether to load 3D volumes instead of 2D slices.
             max_crops_per_volume (int): Maximum number of crops to extract per volume.
+            target_size (tuple): Target size for the volumes (depth, height, width) for deep learning models.
             debug (bool): Whether to print debug statements during processing.
         """
         self.root_dir = root_dir
@@ -124,6 +126,7 @@ class NucleiDataset(Dataset):
         self.return_paths = return_paths
         self.load_volumes = load_volumes
         self.max_crops_per_volume = max_crops_per_volume
+        self.target_size = target_size
         self.debug = debug
         
         # First, determine which samples to include based on CSV (if provided)
@@ -287,10 +290,33 @@ class NucleiDataset(Dataset):
             
             # Get original shape
             original_shape = volume.shape
-
-            # Standard approach returns the original volume
-            resized_volume = volume  # No resize anymore
-            resized_mask = mask
+            
+            # Resize to target size if specified
+            if self.target_size is not None:
+                # Check if resizing is needed
+                if volume.shape != self.target_size:
+                    # Resize volume to target size using skimage.transform.resize
+                    resized_volume = resize(volume, self.target_size, 
+                                            order=1,  # Linear interpolation
+                                            preserve_range=True, 
+                                            anti_aliasing=True)
+                    
+                    # Resize mask using nearest neighbor interpolation to preserve binary values
+                    if mask is not None:
+                        resized_mask = resize(mask, self.target_size, 
+                                             order=0,  # Nearest neighbor interpolation
+                                             preserve_range=True,
+                                             anti_aliasing=False)
+                    else:
+                        resized_mask = None
+                else:
+                    # No resize needed
+                    resized_volume = volume
+                    resized_mask = mask
+            else:
+                # No target size specified
+                resized_volume = volume
+                resized_mask = mask
             
             # Convert to torch tensors
             if self.transform:
@@ -409,6 +435,7 @@ def get_nuclei_dataloader(root_dir,
                           ignore_unclassified=True,
                           load_volumes=False,
                           max_crops_per_volume=8,
+                          target_size=(80, 80, 80),
                           debug=False):
     """
     Create a DataLoader for the nuclei dataset.
@@ -428,6 +455,7 @@ def get_nuclei_dataloader(root_dir,
         ignore_unclassified (bool): Whether to ignore unclassified samples.
         load_volumes (bool): Whether to load 3D volumes instead of 2D slices.
         max_crops_per_volume (int): Maximum number of crops to extract per volume.
+        target_size (tuple): Target size for volumes (depth, height, width) for deep learning models.
         debug (bool): Whether to print debug statements during processing.
         
     Returns:
@@ -458,6 +486,7 @@ def get_nuclei_dataloader(root_dir,
         ignore_unclassified=ignore_unclassified,
         load_volumes=load_volumes,
         max_crops_per_volume=max_crops_per_volume,
+        target_size=target_size,
         debug=debug
     )
     

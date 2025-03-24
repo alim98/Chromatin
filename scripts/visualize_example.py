@@ -4,6 +4,9 @@ import argparse
 import torch
 import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
+import numpy as np
+import glob
+from PIL import Image
 
 # Add parent directory to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -34,8 +37,72 @@ def parse_args():
                         help='Show visualizations (in addition to saving)')
     parser.add_argument('--max_crops', type=int, default=8,
                         help='Maximum number of crops per volume')
+    parser.add_argument('--target_size', type=int, nargs=3, default=[80, 80, 80],
+                        help='Target size for volumes (depth, height, width) for deep learning models')
+    parser.add_argument('--no_resize', action='store_true',
+                        help='Disable resizing to target size (use original size)')
+    parser.add_argument('--compare_resize', action='store_true',
+                        help='Show side-by-side comparison of original and resized volumes')
     
     return parser.parse_args()
+
+
+def load_original_volume(root_dir, sample_id):
+    """
+    Load the original 3D volume and its mask directly from the dataset without resizing.
+    
+    Args:
+        root_dir (str): Root directory of the dataset.
+        sample_id (str): ID of the sample to load.
+        
+    Returns:
+        tuple: (volume, mask) as numpy arrays, or (None, None) if loading fails.
+    """
+    sample_path = os.path.join(root_dir, sample_id)
+    raw_dir = os.path.join(sample_path, 'raw')
+    mask_dir = os.path.join(sample_path, 'mask')
+    
+    # Check if directories exist
+    if not (os.path.exists(raw_dir) and os.path.exists(mask_dir)):
+        print(f"Sample directories not found for {sample_id}")
+        return None, None
+    
+    # Find all image files
+    raw_files = sorted(glob.glob(os.path.join(raw_dir, '*.tif')))
+    
+    if not raw_files:
+        print(f"No image files found for sample {sample_id}")
+        return None, None
+    
+    # Load the first image to get dimensions
+    first_img = np.array(Image.open(raw_files[0]))
+    height, width = first_img.shape
+    depth = len(raw_files)
+    
+    # Initialize volume arrays
+    volume = np.zeros((depth, height, width), dtype=np.float32)
+    mask_volume = np.zeros((depth, height, width), dtype=np.float32)
+    
+    # Load each slice
+    for i, raw_file in enumerate(raw_files):
+        # Get corresponding mask file
+        file_name = os.path.basename(raw_file)
+        mask_file = os.path.join(mask_dir, file_name)
+        
+        # Skip if mask doesn't exist
+        if not os.path.exists(mask_file):
+            continue
+        
+        # Load raw and mask images
+        raw_img = np.array(Image.open(raw_file))
+        mask_img = np.array(Image.open(mask_file))
+        
+        # Add to volume
+        volume[i] = raw_img
+        mask_volume[i] = mask_img
+    
+    print(f"Loaded original volume with shape {volume.shape}")
+    return volume, mask_volume
 
 
 def main():
@@ -70,6 +137,9 @@ def main():
         
     else:
         # 3D volumes mode
+        # Use target_size only if --no_resize is not set
+        target_size = tuple(args.target_size) if not args.no_resize else None
+        
         dataloader = get_nuclei_dataloader(
             root_dir=args.data_dir,
             batch_size=args.batch_size,
@@ -79,10 +149,15 @@ def main():
             filter_by_class=args.class_id,
             return_paths=True,
             load_volumes=True,
-            max_crops_per_volume=args.max_crops
+            max_crops_per_volume=args.max_crops,
+            target_size=target_size
         )
         
         print(f"Created 3D dataloader with {len(dataloader.dataset)} samples")
+        if target_size:
+            print(f"Volumes will be resized to {target_size}")
+        else:
+            print(f"Using original volume sizes (no resizing)")
     
     # Create visualizer
     visualizer = NucleiVisualizer(output_dir=args.output_dir, cmap='gray')
@@ -99,6 +174,8 @@ def main():
             
         elif args.mode == '3d':
             # Visualize 3D volumes
+            print(f"Processing 3D volumes, batch size: {len(batch['volume'])}")
+            
             for i in range(min(args.batch_size, len(batch['volume']))):
                 # Extract the i-th sample
                 sample = {}
@@ -108,11 +185,52 @@ def main():
                     else:
                         sample[key] = batch[key][i]
                 
+                # Get sample ID for file naming
+                sample_id = sample['metadata'].get('sample_id', f'sample_{i}')
+                print(f"Processing sample {i+1}/{min(args.batch_size, len(batch['volume']))}, ID: {sample_id}")
+                
+                # If compare_resize is enabled and we are using resizing
+                if args.compare_resize and not args.no_resize:
+                    print(f"Comparing resize for sample: {sample_id}")
+                    # We need to load the original (unresized) volume
+                    original_volume, original_mask = load_original_volume(args.data_dir, sample_id)
+                    
+                    if original_volume is not None:
+                        print(f"Original volume shape: {original_volume.shape}")
+                        print(f"Resized volume shape: {sample['volume'].shape}")
+                        
+                        # Create side-by-side comparison static image
+                        save_path = os.path.join(args.output_dir, f"{sample_id}_resize_comparison.png")
+                        print(f"Saving resize comparison image to: {save_path}")
+                        visualizer.visualize_resize_comparison(
+                            sample, 
+                            original_volume, 
+                            original_mask, 
+                            save_path=save_path,
+                            show=args.show
+                        )
+                        
+                        # Create side-by-side comparison animation
+                        save_path = os.path.join(args.output_dir, f"{sample_id}_resize_comparison_animation.gif")
+                        print(f"Saving resize comparison animation to: {save_path}")
+                        visualizer.visualize_resize_comparison_animation(
+                            sample,
+                            original_volume,
+                            original_mask,
+                            save_path=save_path,
+                            show=args.show,
+                            axis='z',
+                            frames=15,
+                            interval=250
+                        )
+                    else:
+                        print(f"Failed to load original volume for sample {sample_id}")
+                
+                # Standard visualizations (always performed)
                 # Visualize middle slice from volume
                 visualizer.visualize_slice(sample, show=args.show)
                 
                 # Create animation for z-axis slicing
-                sample_id = sample['metadata'].get('sample_id', f'sample_{i}')
                 save_path = os.path.join(args.output_dir, f"{sample_id}_volume_animation.gif")
                 visualizer.visualize_volume(sample, save_path=save_path, show=args.show,
                                             axis='z', frames=20)

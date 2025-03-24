@@ -462,3 +462,335 @@ class NucleiVisualizer:
                 figures.append(fig)
                 
         return figures 
+
+    def visualize_resize_comparison(self, data_item, original_volume, original_mask, save_path=None, show=True, title=None):
+        """
+        Visualize a side-by-side comparison of original and resized volumes.
+        
+        Args:
+            data_item (dict): Data item from the dataloader with resized volume.
+            original_volume (np.ndarray): Original volume before resizing.
+            original_mask (np.ndarray): Original mask before resizing.
+            save_path (str, optional): Path to save the visualization.
+            show (bool): Whether to display the plot.
+            title (str, optional): Title for the plot.
+            
+        Returns:
+            tuple: Figure and axes objects.
+        """
+        # Extract resized data
+        resized_volume = self._tensor_to_numpy(data_item['volume'])
+        resized_mask = self._tensor_to_numpy(data_item['mask'])
+        
+        # Get middle slices
+        orig_mid_idx = original_volume.shape[0] // 2
+        orig_img = original_volume[orig_mid_idx]
+        orig_mask_slice = original_mask[orig_mid_idx] if original_mask is not None else None
+        
+        resized_mid_idx = resized_volume.shape[0] // 2
+        resized_img = resized_volume[resized_mid_idx]
+        resized_mask_slice = resized_mask[resized_mid_idx] if resized_mask is not None else None
+        
+        # Normalize for visualization
+        orig_img_norm = self._normalize_array(orig_img)
+        orig_mask_norm = self._normalize_array(orig_mask_slice) if orig_mask_slice is not None else None
+        
+        resized_img_norm = self._normalize_array(resized_img)
+        resized_mask_norm = self._normalize_array(resized_mask_slice) if resized_mask_slice is not None else None
+        
+        # Create a 2x3 subplot grid (original and resized, each with raw/mask/overlay)
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        
+        # --- Original volume visualization (top row) ---
+        # Raw image
+        axes[0, 0].imshow(orig_img_norm, cmap=self.cmap)
+        axes[0, 0].set_title("Original - Raw Image")
+        axes[0, 0].axis('off')
+        
+        # Mask
+        if orig_mask_norm is not None:
+            axes[0, 1].imshow(orig_mask_norm, cmap='binary')
+            axes[0, 1].set_title("Original - Mask")
+            axes[0, 1].axis('off')
+        else:
+            axes[0, 1].set_visible(False)
+        
+        # Overlay
+        if orig_mask_norm is not None:
+            axes[0, 2].imshow(orig_img_norm, cmap=self.cmap)
+            mask_overlay = np.ma.masked_where(orig_mask_norm < 0.5, orig_mask_norm)
+            axes[0, 2].imshow(mask_overlay, cmap='autumn', alpha=0.7, interpolation='none')
+            axes[0, 2].set_title("Original - Overlay")
+            axes[0, 2].axis('off')
+        else:
+            axes[0, 2].set_visible(False)
+            
+        # --- Resized volume visualization (bottom row) ---
+        # Raw image
+        axes[1, 0].imshow(resized_img_norm, cmap=self.cmap)
+        axes[1, 0].set_title(f"Resized ({resized_volume.shape[0]}x{resized_volume.shape[1]}x{resized_volume.shape[2]}) - Raw Image")
+        axes[1, 0].axis('off')
+        
+        # Mask
+        if resized_mask_norm is not None:
+            axes[1, 1].imshow(resized_mask_norm, cmap='binary')
+            axes[1, 1].set_title("Resized - Mask")
+            axes[1, 1].axis('off')
+        else:
+            axes[1, 1].set_visible(False)
+        
+        # Overlay
+        if resized_mask_norm is not None:
+            axes[1, 2].imshow(resized_img_norm, cmap=self.cmap)
+            mask_overlay = np.ma.masked_where(resized_mask_norm < 0.5, resized_mask_norm)
+            axes[1, 2].imshow(mask_overlay, cmap='autumn', alpha=0.7, interpolation='none')
+            axes[1, 2].set_title("Resized - Overlay")
+            axes[1, 2].axis('off')
+        else:
+            axes[1, 2].set_visible(False)
+            
+        # Set metadata in the figure title
+        metadata = data_item.get('metadata', {})
+        if title:
+            fig.suptitle(title, fontsize=16)
+        else:
+            sample_id = metadata.get('sample_id', 'Unknown')
+            class_name = metadata.get('class_name', 'Unknown')
+            original_shape = metadata.get('original_shape', 'Unknown')
+            fig.suptitle(f"Sample: {sample_id}, Class: {class_name}\nOriginal shape: {original_shape}", fontsize=14)
+            
+        plt.tight_layout()
+        
+        # Save the figure if requested
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        elif show:
+            # Auto-generate a filename if save_path is not provided
+            if metadata:
+                sample_id = metadata.get('sample_id', 'unknown')
+                auto_save_path = os.path.join(self.output_dir, f"{sample_id}_resize_comparison.png")
+                plt.savefig(auto_save_path, dpi=300, bbox_inches='tight')
+                
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+            
+        return fig, axes 
+
+    def visualize_resize_comparison_animation(self, data_item, original_volume, original_mask, save_path=None, show=True, title=None,
+                                      axis='z', frames=10, interval=200):
+        """
+        Create an animation that shows original and resized volumes side by side for comparison.
+        
+        Args:
+            data_item (dict): Data item from the dataloader with resized volume.
+            original_volume (np.ndarray): Original volume before resizing.
+            original_mask (np.ndarray): Original mask before resizing.
+            save_path (str, optional): Path to save the animation (as .gif).
+            show (bool): Whether to display the animation.
+            title (str, optional): Title for the animation.
+            axis (str): Axis to slice along ('x', 'y', or 'z').
+            frames (int): Number of frames to show (0 for all slices).
+            interval (int): Interval between frames in ms.
+            
+        Returns:
+            tuple: Figure, axes, and animation objects.
+        """
+        # Extract resized data
+        resized_volume = self._tensor_to_numpy(data_item['volume'])
+        resized_mask = self._tensor_to_numpy(data_item['mask'])
+        
+        # Normalize arrays
+        orig_volume_norm = self._normalize_array(original_volume)
+        orig_mask_norm = self._normalize_array(original_mask) if original_mask is not None else None
+        
+        resized_volume_norm = self._normalize_array(resized_volume)
+        resized_mask_norm = self._normalize_array(resized_mask) if resized_mask is not None else None
+        
+        # Determine slicing axis for original
+        if axis == 'z':
+            orig_n_slices = original_volume.shape[0]
+            orig_get_slice = lambda i: (orig_volume_norm[i], orig_mask_norm[i] if orig_mask_norm is not None else None)
+        elif axis == 'y':
+            orig_n_slices = original_volume.shape[1]
+            orig_get_slice = lambda i: (orig_volume_norm[:, i, :], orig_mask_norm[:, i, :] if orig_mask_norm is not None else None)
+        elif axis == 'x':
+            orig_n_slices = original_volume.shape[2]
+            orig_get_slice = lambda i: (orig_volume_norm[:, :, i], orig_mask_norm[:, :, i] if orig_mask_norm is not None else None)
+        else:
+            raise ValueError(f"Invalid axis: {axis}. Must be 'x', 'y', or 'z'.")
+            
+        # Determine slicing axis for resized
+        if axis == 'z':
+            resized_n_slices = resized_volume_norm.shape[0]
+            resized_get_slice = lambda i: (resized_volume_norm[i], resized_mask_norm[i] if resized_mask_norm is not None else None)
+        elif axis == 'y':
+            resized_n_slices = resized_volume_norm.shape[1]
+            resized_get_slice = lambda i: (resized_volume_norm[:, i, :], resized_mask_norm[:, i, :] if resized_mask_norm is not None else None)
+        elif axis == 'x':
+            resized_n_slices = resized_volume_norm.shape[2]
+            resized_get_slice = lambda i: (resized_volume_norm[:, :, i], resized_mask_norm[:, :, i] if resized_mask_norm is not None else None)
+        
+        # Calculate normalized slice positions for consistent comparison
+        if frames <= 0:
+            frames = min(orig_n_slices, resized_n_slices)
+            
+        # Create a larger figure with 2 rows (original and resized) and 3 columns (raw, mask, overlay)
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        
+        # Calculate slice indices for original and resized volumes
+        # We want to show comparable slices (e.g., 25%, 50%, 75% through each volume)
+        orig_step = max(1, orig_n_slices // frames)
+        orig_slice_indices = list(range(0, orig_n_slices, orig_step))[:frames]
+        
+        resized_step = max(1, resized_n_slices // frames)
+        resized_slice_indices = list(range(0, resized_n_slices, resized_step))[:frames]
+        
+        # Make sure we have the same number of frames for both
+        min_frames = min(len(orig_slice_indices), len(resized_slice_indices))
+        orig_slice_indices = orig_slice_indices[:min_frames]
+        resized_slice_indices = resized_slice_indices[:min_frames]
+        
+        # Initialize plots - original row (top)
+        # Original Raw
+        orig_img, _ = orig_get_slice(orig_slice_indices[0])
+        orig_img_plot = axes[0, 0].imshow(orig_img, cmap=self.cmap)
+        axes[0, 0].set_title(f"Original ({original_volume.shape[0]}x{original_volume.shape[1]}x{original_volume.shape[2]}) - Raw")
+        axes[0, 0].axis('off')
+        
+        # Original Mask
+        if orig_mask_norm is not None:
+            _, orig_mask_slice = orig_get_slice(orig_slice_indices[0])
+            orig_mask_plot = axes[0, 1].imshow(orig_mask_slice, cmap='binary')
+            axes[0, 1].set_title("Original - Mask")
+            axes[0, 1].axis('off')
+        else:
+            axes[0, 1].set_visible(False)
+            orig_mask_plot = None
+        
+        # Original Overlay
+        if orig_mask_norm is not None:
+            orig_img_slice, orig_mask_slice = orig_get_slice(orig_slice_indices[0])
+            orig_overlay_img = axes[0, 2].imshow(orig_img_slice, cmap=self.cmap)
+            orig_masked_data = np.ma.masked_where(orig_mask_slice < 0.5, orig_mask_slice)
+            orig_overlay_mask = axes[0, 2].imshow(orig_masked_data, cmap='autumn', alpha=0.7, interpolation='none')
+            axes[0, 2].set_title("Original - Overlay")
+            axes[0, 2].axis('off')
+        else:
+            axes[0, 2].set_visible(False)
+            orig_overlay_img = None
+            orig_overlay_mask = None
+            
+        # Initialize plots - resized row (bottom)
+        # Resized Raw
+        resized_img, _ = resized_get_slice(resized_slice_indices[0])
+        resized_img_plot = axes[1, 0].imshow(resized_img, cmap=self.cmap)
+        axes[1, 0].set_title(f"Resized ({resized_volume.shape[0]}x{resized_volume.shape[1]}x{resized_volume.shape[2]}) - Raw")
+        axes[1, 0].axis('off')
+        
+        # Resized Mask
+        if resized_mask_norm is not None:
+            _, resized_mask_slice = resized_get_slice(resized_slice_indices[0])
+            resized_mask_plot = axes[1, 1].imshow(resized_mask_slice, cmap='binary')
+            axes[1, 1].set_title("Resized - Mask")
+            axes[1, 1].axis('off')
+        else:
+            axes[1, 1].set_visible(False)
+            resized_mask_plot = None
+        
+        # Resized Overlay
+        if resized_mask_norm is not None:
+            resized_img_slice, resized_mask_slice = resized_get_slice(resized_slice_indices[0])
+            resized_overlay_img = axes[1, 2].imshow(resized_img_slice, cmap=self.cmap)
+            resized_masked_data = np.ma.masked_where(resized_mask_slice < 0.5, resized_mask_slice)
+            resized_overlay_mask = axes[1, 2].imshow(resized_masked_data, cmap='autumn', alpha=0.7, interpolation='none')
+            axes[1, 2].set_title("Resized - Overlay")
+            axes[1, 2].axis('off')
+        else:
+            axes[1, 2].set_visible(False)
+            resized_overlay_img = None
+            resized_overlay_mask = None
+            
+        # Set metadata in the figure title
+        metadata = data_item.get('metadata', {})
+        if title:
+            main_title = title
+        else:
+            sample_id = metadata.get('sample_id', 'Unknown')
+            class_name = metadata.get('class_name', 'Unknown')
+            main_title = f"Sample: {sample_id}, Class: {class_name}"
+            
+        plt.tight_layout()
+        
+        # Create lists to store all plot objects that will be updated
+        orig_plots = [p for p in [orig_img_plot, orig_mask_plot, orig_overlay_img, orig_overlay_mask] if p is not None]
+        resized_plots = [p for p in [resized_img_plot, resized_mask_plot, resized_overlay_img, resized_overlay_mask] if p is not None]
+        
+        # Update function for animation
+        def update(frame_idx):
+            # Get slice indices for this frame
+            orig_idx = orig_slice_indices[frame_idx]
+            resized_idx = resized_slice_indices[frame_idx]
+            
+            # Update original plots
+            orig_img_slice, orig_mask_slice = orig_get_slice(orig_idx)
+            orig_img_plot.set_array(orig_img_slice)
+            
+            if orig_mask_norm is not None and orig_mask_plot is not None:
+                orig_mask_plot.set_array(orig_mask_slice)
+            
+            if orig_mask_norm is not None and orig_overlay_img is not None and orig_overlay_mask is not None:
+                orig_overlay_img.set_array(orig_img_slice)
+                orig_masked_data = np.ma.masked_where(orig_mask_slice < 0.5, orig_mask_slice)
+                orig_overlay_mask.set_array(orig_masked_data)
+            
+            # Update resized plots
+            resized_img_slice, resized_mask_slice = resized_get_slice(resized_idx)
+            resized_img_plot.set_array(resized_img_slice)
+            
+            if resized_mask_norm is not None and resized_mask_plot is not None:
+                resized_mask_plot.set_array(resized_mask_slice)
+            
+            if resized_mask_norm is not None and resized_overlay_img is not None and resized_overlay_mask is not None:
+                resized_overlay_img.set_array(resized_img_slice)
+                resized_masked_data = np.ma.masked_where(resized_mask_slice < 0.5, resized_mask_slice)
+                resized_overlay_mask.set_array(resized_masked_data)
+                
+            # Update title with slice numbers
+            percentage = frame_idx / (len(orig_slice_indices) - 1) * 100 if len(orig_slice_indices) > 1 else 0
+            fig.suptitle(f"{main_title} - Original Slice {orig_idx}/{orig_n_slices-1}, Resized Slice {resized_idx}/{resized_n_slices-1} (≈{percentage:.0f}% through volume)")
+            
+            return orig_plots + resized_plots
+            
+        # Create animation
+        ani = animation.FuncAnimation(fig, update, frames=len(orig_slice_indices), 
+                                      interval=interval, blit=False)
+        
+        # Save animation if requested
+        if save_path:
+            try:
+                # Ensure .gif extension
+                if not save_path.endswith('.gif'):
+                    save_path += '.gif'
+                ani.save(save_path, writer='pillow', fps=1000/interval)
+                print(f"Animation saved to {save_path}")
+            except Exception as e:
+                print(f"Failed to save animation: {e}")
+        elif show:
+            # Auto-generate a filename if save_path is not provided
+            if metadata:
+                sample_id = metadata.get('sample_id', 'unknown')
+                auto_save_path = os.path.join(self.output_dir, f"{sample_id}_resize_comparison_animation.gif")
+                try:
+                    ani.save(auto_save_path, writer='pillow', fps=1000/interval)
+                    print(f"Animation saved to {auto_save_path}")
+                except Exception as e:
+                    print(f"Failed to save animation: {e}")
+                
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+            
+        return fig, axes, ani 
