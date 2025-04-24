@@ -1,3 +1,4 @@
+Python scripts/finetune_vgg3d.py --sample_percent 1 --freeze_features --num_workers 0 --batch_size 1
 # Nuclei Data Visualization
 
 This folder contains scripts for visualizing nuclei data from the custom dataloader. The visualization tools support both 2D slices and 3D volumes with their corresponding masks.
