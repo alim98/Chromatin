@@ -98,7 +98,6 @@ results/*
 
 # ignore all files in logs/
 logs/*  
-
-
-
-
+results2/*
+results2/*
+*.pth

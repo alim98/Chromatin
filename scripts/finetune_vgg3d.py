@@ -226,11 +226,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
         # Print shape information
         if isinstance(test_batch['volume'], torch.Tensor):
             # If volume is already a tensor (batched by custom_collate_fn)
-            print(f"First batch loaded successfully! Volume shape: {test_batch['volume'].shape}")
+            # print(f"First batch loaded successfully! Volume shape: {test_batch['volume'].shape}")
             volumes = test_batch['volume'].to(device)
         else:
             # If volume is still a list
-            print(f"First batch loaded successfully! First volume shape: {test_batch['volume'][0].shape}")
+            # print(f"First batch loaded successfully! First volume shape: {test_batch['volume'][0].shape}")
             volumes = torch.stack(test_batch['volume']).to(device)
         
         # Convert labels to tensor and move to device
