@@ -240,11 +240,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
         
         # Verify labels are within expected range
         n_classes = model.classifier[-1].out_features
-        min_label = labels.min().item()
-        max_label = labels.max().item()
-        print(f"Label range: [{min_label}, {max_label}], Number of model output classes: {n_classes}")
+        min_class = labels.min().item()
+        max_class = labels.max().item()
+        print(f"Label range: [{min_class}, {max_class}], Number of model output classes: {n_classes}")
         
-        if min_label < 0 or max_label >= n_classes:
+        if min_class < 0 or max_class >= n_classes:
             print(f"WARNING: Labels out of range! Must be between 0 and {n_classes-1}")
             if args.force_cpu:
                 # Continue anyway since we're in debug mode
@@ -270,6 +270,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
         import traceback
         traceback.print_exc()
         raise
+        
+    # Flag to track if we need to adjust labels from 1-based to 0-based indexing
+    adjust_labels = False
+    if min_class == 1:
+        adjust_labels = True
+        print("Will adjust labels by subtracting 1 to convert from 1-based to 0-based indexing")
         
     for epoch in range(args.epochs):
         epoch_start_time = time.time()
@@ -322,6 +328,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
                     
                     # Move to device
                     volumes = volumes.to(device)
+                    if adjust_labels and isinstance(labels, list):
+                        # Convert labels from 1-based to 0-based indexing
+                        labels = [l - 1 for l in labels]
                     labels = torch.tensor(labels).to(device)
                 else:
                     # Check for uniform shapes in list
@@ -342,6 +351,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
                             volumes_stacked = torch.nan_to_num(volumes_stacked, nan=0.0, posinf=0.0, neginf=0.0)
                         
                         volumes = volumes_stacked.to(device)
+                        if adjust_labels and isinstance(labels, list):
+                            # Convert labels from 1-based to 0-based indexing
+                            labels = [l - 1 for l in labels]
                         labels = torch.tensor(labels).to(device)
                     except RuntimeError as e:
                         print(f"ERROR stacking volumes in batch {batch_count}: {e}")
@@ -424,7 +436,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
         if (epoch % args.validation_freq == 0) or (epoch == args.epochs - 1):
             print(f"Validation phase started...")
             try:
-                val_metrics = validate_model(model, val_loader, criterion, device)
+                val_metrics = validate_model(model, val_loader, criterion, device, adjust_labels)
                 val_loss = val_metrics['loss']
                 val_acc = val_metrics['accuracy']
                 val_f1 = val_metrics['f1']
@@ -547,7 +559,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
     
     return model, history
 
-def validate_model(model, data_loader, criterion, device):
+def validate_model(model, data_loader, criterion, device, adjust_labels=False):
     """
     Validate the model on the provided data loader
     
@@ -556,6 +568,7 @@ def validate_model(model, data_loader, criterion, device):
         data_loader: DataLoader for validation data
         criterion: Loss function
         device: Device to run validation on
+        adjust_labels: Whether to adjust labels from 1-based to 0-based indexing
         
     Returns:
         Dictionary with validation metrics
@@ -610,11 +623,17 @@ def validate_model(model, data_loader, criterion, device):
                     try:    
                         # Move to validation device - either CPU or original device
                         volumes = volumes.to(validation_device)
+                        if adjust_labels and isinstance(labels, list):
+                            # Convert labels from 1-based to 0-based indexing
+                            labels = [l - 1 for l in labels]
                         labels = torch.tensor(labels).to(validation_device)
                     except RuntimeError as e:
                         print(f"ERROR moving batch {batch_idx} to device: {e}")
                         print("Falling back to CPU for this batch")
                         volumes = volumes.cpu()
+                        if adjust_labels and isinstance(labels, list):
+                            # Convert labels from 1-based to 0-based indexing
+                            labels = [l - 1 for l in labels]
                         labels = torch.tensor(labels).cpu()
                 else:
                     # Check for uniform shapes in list
@@ -635,6 +654,9 @@ def validate_model(model, data_loader, criterion, device):
                             volumes_stacked = torch.nan_to_num(volumes_stacked, nan=0.0, posinf=0.0, neginf=0.0)
                             
                         volumes = volumes_stacked.to(validation_device)
+                        if adjust_labels and isinstance(labels, list):
+                            # Convert labels from 1-based to 0-based indexing
+                            labels = [l - 1 for l in labels]
                         labels = torch.tensor(labels).to(validation_device)
                     except RuntimeError as e:
                         print(f"ERROR stacking volumes in validation batch {batch_idx}: {e}")
@@ -777,7 +799,7 @@ def plot_training_history(history, save_path):
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f'Saved enhanced training history plot to {save_path}')
 
-def evaluate_model(model, test_loader, args):
+def evaluate_model(model, test_loader, args, adjust_labels=False):
     """
     Evaluate the model on the test set with enhanced metrics
     
@@ -785,6 +807,7 @@ def evaluate_model(model, test_loader, args):
         model: The trained model
         test_loader: DataLoader for test data
         args: Command line arguments
+        adjust_labels: Whether to adjust labels from 1-based to 0-based indexing
         
     Returns:
         Dictionary with evaluation metrics
@@ -807,6 +830,9 @@ def evaluate_model(model, test_loader, args):
             
             # Move to device
             volumes = torch.stack(volumes).to(device)
+            if adjust_labels and isinstance(labels, list):
+                # Convert labels from 1-based to 0-based indexing
+                labels = [l - 1 for l in labels]
             labels = torch.tensor(labels).to(device)
             
             # Forward pass
@@ -1294,8 +1320,21 @@ def main():
                         all_classes.update(batch['label'].cpu().numpy())
                     break
             
-            args.output_classes = max(all_classes) + 1  # Add 1 because class IDs start from 0
-            print(f"Automatically determined number of output classes: {args.output_classes}")
+            # Handle class IDs that start from 1 instead of 0
+            min_class = min(all_classes) if all_classes else 1
+            max_class = max(all_classes) if all_classes else 19
+            
+            if min_class == 1:
+                # Class IDs start from 1, so we need exactly max_class output classes
+                args.output_classes = max_class
+                print(f"Classes start from 1. Setting output classes to match max class ID: {args.output_classes}")
+                
+                # Add a note about how labels will be handled
+                print("NOTE: Class IDs in CSV file start from 1, but model inputs will be adjusted to start from 0")
+            else:
+                # Standard case: add 1 because class IDs start from 0
+                args.output_classes = max_class + 1
+                print(f"Automatically determined number of output classes: {args.output_classes}")
         
         # Load model
         print(f"Loading model from checkpoint: {args.checkpoint}")
@@ -1472,7 +1511,7 @@ def main():
         
         # Evaluate the model on validation data
         print("\nEvaluating model on validation data...")
-        val_results = evaluate_model(model, val_loader, args)
+        val_results = evaluate_model(model, val_loader, args, adjust_labels=False)
         save_evaluation_results(val_results, args.output_dir)
         
         # Save final model
