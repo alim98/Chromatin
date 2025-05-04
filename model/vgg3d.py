@@ -68,7 +68,21 @@ class Vgg3D(nn.Module):
         return self.classifier(x)
 
 def load_model_from_checkpoint(model, checkpoint_path):
+    """
+    Load model from checkpoint, handling potential size mismatches in the final classifier layer.
+    
+    Args:
+        model: The model instance to load weights into
+        checkpoint_path: Path to the checkpoint file
+        
+    Returns:
+        The model with loaded weights
+    """
     print(f"Starting to load model from checkpoint: {checkpoint_path}")
+    if not os.path.exists(checkpoint_path):
+        print(f"ERROR: Checkpoint file not found: {checkpoint_path}")
+        return model
+        
     print(f"Checkpoint file size: {os.path.getsize(checkpoint_path) / (1024*1024*1024):.2f} GB")
     
     # Check available memory
@@ -84,19 +98,47 @@ def load_model_from_checkpoint(model, checkpoint_path):
         print("Checkpoint contents:")
         if isinstance(checkpoint, dict):
             print(f"Checkpoint is a dictionary with keys: {list(checkpoint.keys())}")
+            # Extract the state dict
+            state_dict = checkpoint.get('model_state_dict', checkpoint)
+            
             if 'model_state_dict' in checkpoint:
                 print("Found 'model_state_dict' key in checkpoint")
                 print(f"Loading state_dict with {len(checkpoint['model_state_dict'])} layers...")
-                model.load_state_dict(checkpoint['model_state_dict'])
+                state_dict = checkpoint['model_state_dict']
             else:
                 print("Using checkpoint directly as state_dict")
                 print(f"Loading state_dict with {len(checkpoint)} layers...")
-                model.load_state_dict(checkpoint)
+                state_dict = checkpoint
+                
+            # Check for classifier layer size mismatch
+            output_layer_weight_key = 'classifier.6.weight'
+            output_layer_bias_key = 'classifier.6.bias'
+            
+            if (output_layer_weight_key in state_dict and 
+                state_dict[output_layer_weight_key].size(0) != model.classifier[-1].weight.size(0)):
+                
+                # Size mismatch in output layer
+                checkpoint_classes = state_dict[output_layer_weight_key].size(0)
+                model_classes = model.classifier[-1].weight.size(0)
+                
+                print(f"Output layer size mismatch: checkpoint has {checkpoint_classes} classes, model has {model_classes} classes")
+                print("Loading all layers except the final classification layer")
+                
+                # Remove the mismatched layers from the state dict
+                state_dict.pop(output_layer_weight_key, None)
+                state_dict.pop(output_layer_bias_key, None)
+                
+                # Load the rest of the layers
+                model.load_state_dict(state_dict, strict=False)
+                print(f"Successfully loaded pretrained weights for all compatible layers")
+                print(f"Final classification layer with {model_classes} classes initialized randomly")
+            else:
+                # No mismatch or not checking for it, load normally
+                model.load_state_dict(state_dict)
+                print(f"Model loaded successfully from {checkpoint_path}")
         else:
             print(f"Unexpected checkpoint type: {type(checkpoint)}")
-            return model
             
-        print(f"Model loaded successfully from {checkpoint_path}")
         return model
     except Exception as e:
         print(f"Error loading model: {e}")

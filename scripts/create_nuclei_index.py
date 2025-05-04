@@ -90,6 +90,12 @@ def create_nuclei_index(data_dir, output_csv, class_csv_path=None):
             print(f"Warning: No raw files found for sample {sample_id}")
             continue
         
+        # Print some debug info for the first few samples
+        if len(data) < 5:
+            print(f"Sample {sample_id}: Found {len(raw_files)} raw files")
+            print(f"  First file: {os.path.basename(raw_files[0])}")
+            print(f"  Last file: {os.path.basename(raw_files[-1])}")
+        
         # Get dimensions from first image to describe the volume
         try:
             first_img = np.array(Image.open(raw_files[0]))

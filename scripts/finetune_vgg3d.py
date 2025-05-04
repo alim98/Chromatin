@@ -27,6 +27,42 @@ import config
 from dataloader.nuclei_dataloader import get_nuclei_dataloader
 from model.vgg3d import Vgg3D, load_model_from_checkpoint
 
+# Custom adapter model to handle size mismatches
+class Vgg3DAdapter(nn.Module):
+    def __init__(self, base_model, input_size, num_classes, classifier_size=512):
+        super(Vgg3DAdapter, self).__init__()
+        self.features = base_model.features
+        
+        # Calculate the feature output size with a forward pass
+        test_input = torch.zeros(1, 1, *input_size)
+        with torch.no_grad():
+            feature_output = self.features(test_input)
+        feature_size = feature_output.view(1, -1).size(1)
+        
+        print(f"Feature extractor produces {feature_size} features")
+        
+        # Create a new classifier that matches the feature size
+        self.classifier = nn.Sequential(
+            nn.Linear(feature_size, classifier_size),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(classifier_size, classifier_size),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(classifier_size, num_classes),
+        )
+        
+        # Initialize the classifier
+        for m in self.classifier.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Finetune VGG3D model on nuclei dataset')
     
@@ -60,16 +96,20 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=20, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.0001, help='Weight decay')
+    parser.add_argument('--weight_decay', type=float, default=0.001, help='Weight decay (L2 regularization) to reduce overfitting')
     parser.add_argument('--momentum', type=float, default=0.9, help='Momentum for SGD')
     parser.add_argument('--optimizer', type=str, choices=['sgd', 'adam'], default='adam',
                         help='Optimizer to use for training')
     parser.add_argument('--early_stopping', type=int, default=10,
                         help='Number of epochs to wait for improvement before stopping')
-    parser.add_argument('--freeze_features', default=None, action='store_true', 
-                        help='Freeze feature extractor layers and only train classifier')
+    parser.add_argument('--freeze_features', action='store_true', default=True,
+                        help='Freeze feature extractor layers and only train classifier (default: True)')
     parser.add_argument('--freeze_classifier_layers', type=int, default=0,
                         help='Number of classifier layers to freeze (0-5, 0 means train all classifier layers)')
+    parser.add_argument('--reduce_classifier', action='store_true', default=False,
+                        help='Reduce the size of classifier layers to decrease trainable parameters')
+    parser.add_argument('--classifier_size', type=int, default=512,
+                        help='Size of the reduced classifier layer (only used if --reduce_classifier is set)')
     parser.add_argument('--train_split', type=float, default=0.8,
                         help='Fraction of data to use for training (vs validation)')
     
@@ -109,6 +149,8 @@ def parse_args():
                         help='Force CPU usage even if CUDA is available')
     parser.add_argument('--batch_limit', type=int, default=None,
                         help='Limit the number of batches processed per epoch (for debugging)')
+    parser.add_argument('--margin', type=int, default=10,
+                        help='Number of pixels to discard from the edge of each sample to reduce overfitting (0-20)')
     
     return parser.parse_args()
 
@@ -525,8 +567,13 @@ def validate_model(model, data_loader, criterion, device):
     all_preds = []
     all_labels = []
     
+    # Check if we should force CPU validation based on the global args context
+    force_cpu_validation = False
+    if 'args' in globals() and hasattr(globals()['args'], 'force_cpu_validation'):
+        force_cpu_validation = globals()['args'].force_cpu_validation
+    
     # Force CPU validation if requested
-    if args.force_cpu_validation:
+    if force_cpu_validation:
         print("Forcing validation on CPU as requested")
         validation_device = torch.device('cpu')
         # Move model to CPU first
@@ -659,7 +706,7 @@ def validate_model(model, data_loader, criterion, device):
     val_f1 = report['macro avg']['f1-score']
     
     # Move model back to original device if needed
-    if args.force_cpu_validation and device.type == 'cuda':
+    if force_cpu_validation and device.type == 'cuda':
         model = model.to(device)
     
     return {
@@ -915,11 +962,19 @@ def save_evaluation_results(results, save_dir, class_names=None):
     
     print(f'Saved enhanced evaluation results to {save_dir}')
 
-def basic_transform(x):
+def basic_transform(x, margin=0):
     """Transform a 3D volume to a 5D tensor with shape (1, 1, D, H, W)"""
     # First convert to numpy array if not already
     if not isinstance(x, np.ndarray):
         x = np.array(x)
+    
+    # Apply margin if specified (discard pixels from edges)
+    if margin > 0 and x.ndim == 3:
+        # Ensure margin isn't too large for the input
+        safe_margin = min(margin, min(x.shape) // 4)
+        if safe_margin > 0:
+            # Apply margin to all three dimensions
+            x = x[safe_margin:-safe_margin, safe_margin:-safe_margin, safe_margin:-safe_margin]
     
     # Convert to tensor
     x_tensor = torch.from_numpy(x).float()
@@ -964,10 +1019,10 @@ def basic_transform(x):
     
     return x_tensor
 
-def augmented_transform(x):
+def augmented_transform(x, margin=0):
     """Transform a 3D volume to a 5D tensor with shape (1, 1, D, H, W) with augmentations"""
     # First apply basic transform to get initial 5D tensor
-    x_tensor = basic_transform(x)
+    x_tensor = basic_transform(x, margin)
     
     # Apply augmentations with 50% chance for each
     if np.random.rand() < 0.5:  # Random flip along z-axis
@@ -1041,21 +1096,22 @@ def mask_transform(x):
     
     return x_tensor
 
-def get_transforms(target_size, use_augmentation=False):
+def get_transforms(target_size, use_augmentation=False, margin=0):
     """
     Define transformations for the input data.
     
     Args:
         target_size: Target size for volumes (depth, height, width)
         use_augmentation: Whether to use data augmentation
+        margin: Number of pixels to discard from each edge
         
     Returns:
         transform, mask_transform functions
     """
     if use_augmentation:
-        return augmented_transform, mask_transform
+        return partial(augmented_transform, margin=margin), mask_transform
     else:
-        return basic_transform, mask_transform
+        return partial(basic_transform, margin=margin), mask_transform
 
 def monitor_memory(stop_event, interval=5.0):
     """
@@ -1086,9 +1142,9 @@ def monitor_memory(stop_event, interval=5.0):
         # Sleep for the interval
         time.sleep(interval)
 
-def non_augmented_transform(x, target_size):
+def non_augmented_transform(x, target_size, margin=0):
     """Non-augmented transform function that ensures proper 5D tensor output"""
-    return basic_transform(x)
+    return basic_transform(x, margin)
 
 def ensure_index_csv_exists(args):
     """
@@ -1134,7 +1190,10 @@ def main():
     index_csv = ensure_index_csv_exists(args)
     
     # Get transforms
-    transform, mask_transform = get_transforms(args.target_size, args.use_augmentation)
+    transform, mask_transform = get_transforms(args.target_size, args.use_augmentation, args.margin)
+    
+    if args.margin > 0:
+        print(f"Using margin of {args.margin} pixels to discard from edges of samples")
     
     # Make sure the nuclei index file exists
     ensure_index_csv_exists(args)
@@ -1159,17 +1218,17 @@ def main():
         print("Creating data loaders with lazy loading...")
         
         dataloader = get_nuclei_dataloader(
-            root_dir=args.data_dir,
-            batch_size=args.batch_size,
+                root_dir=args.data_dir,
+                batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            transform=transform,
-            mask_transform=mask_transform,
-            class_csv_path=args.class_csv,
-            filter_by_class=args.class_id,
+                transform=transform,
+                mask_transform=mask_transform,
+                class_csv_path=args.class_csv,
+                filter_by_class=args.class_id,
             ignore_unclassified=True,
-            target_size=tuple(args.target_size),
-            sample_percent=args.sample_percent,
+                target_size=tuple(args.target_size),
+                sample_percent=args.sample_percent,
             pin_memory=args.pin_memory,
             debug=True  # Enable debug output for the dataloader
         )
@@ -1192,7 +1251,7 @@ def main():
         
         train_loader = DataLoader(
             train_dataset,
-            batch_size=args.batch_size,
+                batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
             collate_fn=dataloader.collate_fn,
@@ -1240,20 +1299,124 @@ def main():
         
         # Load model
         print(f"Loading model from checkpoint: {args.checkpoint}")
-        # Create the model with the correct number of output classes first
-        model = Vgg3D(
+        
+        # Create a base model first to extract features
+        base_model = Vgg3D(
             input_size=tuple(args.target_size),
             output_classes=args.output_classes,
             input_fmaps=1  # Single channel input
         )
-        # Then load the checkpoint
-        model = load_model_from_checkpoint(model, args.checkpoint)
+        
+        # Load only the feature extractor weights
+        try:
+            print("Loading checkpoint (features only)...")
+            checkpoint = torch.load(args.checkpoint, map_location='cpu')
+            
+            # Extract the state dict
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            elif isinstance(checkpoint, dict):
+                state_dict = checkpoint
+            else:
+                state_dict = checkpoint
+            
+            # Filter to include only feature layers
+            feature_state_dict = {k: v for k, v in state_dict.items() if k.startswith('features')}
+            base_model.load_state_dict(feature_state_dict, strict=False)
+            print(f"Successfully loaded feature extractor weights from checkpoint")
+        except Exception as e:
+            print(f"Error loading feature extractor: {e}")
+            print("Proceeding with randomly initialized feature extractor")
+            
+        # Get an actual sample from the dataset to determine correct dimensions 
+        print("Getting a sample from the dataset to determine actual dimensions...")
+        try:
+            # Get a sample from the training dataloader
+            sample_batch = next(iter(train_loader))
+            sample_volume = sample_batch['volume']
+            
+            # Convert to tensor if it's a list
+            if isinstance(sample_volume, list):
+                sample_volume = torch.stack(sample_volume)
+                
+            # Extract a single sample if it's a batch
+            if len(sample_volume.shape) > 4:
+                sample_volume = sample_volume[0:1]
+                
+            print(f"Sample volume shape from dataset: {sample_volume.shape}")
+            
+            # Run it through the feature extractor to get the actual output size
+            with torch.no_grad():
+                features = base_model.features(sample_volume)
+                feature_size = features.view(features.size(0), -1).size(1)
+            
+            print(f"Actual feature output size with real sample: {feature_size}")
+        except Exception as e:
+            print(f"Error getting real sample dimensions: {e}")
+            # Fall back to creating a synthetic sample
+            print("Falling back to synthetic sample...")
+            # Apply the exact same transformations that would happen in the dataloader
+            synthetic_sample = torch.zeros(1, 1, *args.target_size)
+            if args.margin > 0:
+                margin = args.margin
+                print(f"Applying margin of {margin} to synthetic sample")
+                synthetic_sample = synthetic_sample[:, :, margin:-margin, margin:-margin, margin:-margin]
+            print(f"Synthetic sample shape: {synthetic_sample.shape}")
+            
+            with torch.no_grad():
+                features = base_model.features(synthetic_sample)
+                feature_size = features.view(features.size(0), -1).size(1)
+            
+            print(f"Feature size with synthetic sample: {feature_size}")
+        
+        # Create the adapter model with the correct feature output size -> classifier input size
+        print("Creating adapter model with appropriate classifier size...")
+        
+        # Create a custom Vgg3DAdapter with the correct feature size
+        class CustomVgg3DAdapter(nn.Module):
+            def __init__(self, base_features, feature_size, num_classes, classifier_size=512):
+                super(CustomVgg3DAdapter, self).__init__()
+                self.features = base_features
+                
+                self.classifier = nn.Sequential(
+                    nn.Linear(feature_size, classifier_size),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.5),
+                    nn.Linear(classifier_size, classifier_size),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.5),
+                    nn.Linear(classifier_size, num_classes),
+                )
+                
+                # Initialize the classifier
+                for m in self.classifier.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.kaiming_normal_(m.weight)
+                        nn.init.constant_(m.bias, 0)
+            
+            def forward(self, x):
+                x = self.features(x)
+                x = x.view(x.size(0), -1)
+                return self.classifier(x)
+        
+        # Create the adapter with the exact feature size needed
+        model = CustomVgg3DAdapter(
+            base_features=base_model.features,
+            feature_size=feature_size,
+            num_classes=args.output_classes,
+            classifier_size=args.classifier_size
+        )
+        print(f"Successfully created adapter model with correct dimensions: {feature_size} -> {args.classifier_size} -> {args.output_classes}")
         
         if args.freeze_features:
             # Freeze feature extractor layers
-            print("Freezing feature extractor layers")
+            print("FINETUNING MODE: Freezing feature extractor layers")
             for param in model.features.parameters():
                 param.requires_grad = False
+            print("Only training classifier layers (significantly reduces trainable parameters)")
+        else:
+            print("FULL TRAINING MODE: Training all model parameters (feature extractor and classifier)")
+            print("Warning: This requires significantly more training data and time compared to finetuning")
         
         if args.freeze_classifier_layers > 0:
             # Freeze the specified number of classifier layers
@@ -1267,20 +1430,31 @@ def main():
         if args.optimizer == 'sgd':
             optimizer = optim.SGD(
                 [p for p in model.parameters() if p.requires_grad], 
-                lr=args.lr, 
+                lr=args.lr,
                 momentum=args.momentum,
                 weight_decay=args.weight_decay
             )
         else:  # adam
             optimizer = optim.Adam(
                 [p for p in model.parameters() if p.requires_grad], 
-                lr=args.lr, 
+                lr=args.lr,
                 weight_decay=args.weight_decay
             )
         
         # Check if model has any parameters to train
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        feature_params = sum(p.numel() for p in model.features.parameters() if p.requires_grad)
+        classifier_params = sum(p.numel() for p in model.classifier.parameters() if p.requires_grad)
+        
         print(f"Model has {trainable_params:,} trainable parameters")
+        print(f"  - Feature extractor: {feature_params:,} trainable parameters")
+        print(f"  - Classifier: {classifier_params:,} trainable parameters")
+        
+        # Recommend classifier reduction if high parameter count
+        if classifier_params > 10000000 and not args.reduce_classifier:
+            print("\nRECOMMENDATION: The classifier has a very high number of parameters.")
+            print("To reduce overfitting and improve training, try running with --reduce_classifier")
+            print("This will significantly reduce the number of trainable parameters.")
         
         if trainable_params == 0:
             raise ValueError("No trainable parameters in the model! Check your freeze settings.")

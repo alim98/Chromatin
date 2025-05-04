@@ -488,31 +488,33 @@ def get_nuclei_dataloader(root_dir,
                           target_size=(80, 80, 80),
                           load_volumes=True,
                           sample_percent=100,  # Percentage of samples to load per class
+                          crop_size=(80, 80, 80),  # Size of each cropped volume
                           pin_memory=False,  # Disable pin memory by default
                           debug=False):
     """
-    Get a PyTorch DataLoader for the nuclei dataset.
+    Create a DataLoader for the nuclei dataset.
     
     Args:
         root_dir (str): Root directory of the nuclei dataset.
-        batch_size (int): Batch size for the dataloader.
+        batch_size (int): Batch size for the DataLoader.
         shuffle (bool): Whether to shuffle the dataset.
         num_workers (int): Number of worker processes for data loading.
         transform (callable, optional): Transform to be applied on the raw volumes.
         mask_transform (callable, optional): Transform to be applied on the mask volumes.
         sample_ids (list, optional): List of sample IDs to include.
-        return_paths (bool): Whether to include file paths in metadata.
+        return_paths (bool): Whether to return file paths in the DataLoader.
         class_csv_path (str, optional): Path to CSV file containing chromatin class information.
         filter_by_class (int or list, optional): Class ID or list of class IDs to include.
         ignore_unclassified (bool): Whether to ignore unclassified samples.
         target_size (tuple): Target size for the volumes (depth, height, width) for deep learning models.
         load_volumes (bool): Whether to load 3D volumes (True by default).
         sample_percent (int): Percentage of samples to load per class (1-100).
-        pin_memory (bool): Whether to use pinned memory. Recommended to set to False if getting CUDA errors.
+        crop_size (tuple): Size of each 3D cropped volume (depth, height, width).
+        pin_memory (bool): Whether to use pinned memory for faster CUDA transfers.
         debug (bool): Whether to print debug statements during processing.
         
     Returns:
-        DataLoader: PyTorch DataLoader for the nuclei dataset.
+        DataLoader: DataLoader for the nuclei dataset.
     """
     # Check if path exists
     if not os.path.exists(root_dir):
@@ -527,8 +529,9 @@ def get_nuclei_dataloader(root_dir,
         class_csv_path=class_csv_path,
         filter_by_class=filter_by_class,
         ignore_unclassified=ignore_unclassified,
-        target_size=target_size,
         load_volumes=load_volumes,
+        target_size=target_size,
+        crop_size=crop_size,  # Pass through crop_size parameter
         sample_percent=sample_percent,
         debug=debug
     )
