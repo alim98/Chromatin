@@ -11,7 +11,7 @@ This project provides tools for analyzing and classifying 3D nuclei samples usin
 ### Creating the Environment
 1. Clone this repository:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/alim98/Chromatin
    cd Chromatin
    ```
 
@@ -48,6 +48,3 @@ python scripts/visualize_example.py --mode 2d --num_samples 5
 ```bash
 python scripts/create_nuclei_index.py --data_dir data/nuclei_sample_1a_v1
 ```
-
-## License
-[Your License Here] 
