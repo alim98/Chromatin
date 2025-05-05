@@ -507,9 +507,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, args):
                 else:
                     patience_counter += 1
                     print(f"  No improvement in tracked metrics. Patience: {patience_counter}/{args.early_stopping}")
-                    if patience_counter >= args.early_stopping:
-                        print(f"Early stopping after {epoch+1} epochs")
-                        break
             except Exception as e:
                 print(f"ERROR during validation: {e}")
                 import traceback

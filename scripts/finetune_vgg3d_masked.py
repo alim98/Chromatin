@@ -1,3 +1,10 @@
+# Unfreeze all convolutional blocks (full fine-tuning)
+# python scripts/finetune_vgg3d_masked.py --unfreeze_last_n_layers -1
+
+# Unfreeze last 2 convolutional blocks (last 2 layers)
+# python scripts/finetune_vgg3d_masked.py --unfreeze_last_n_layers 2
+
+
 import os
 import sys
 import argparse
@@ -204,7 +211,7 @@ def parse_args():
     
     # Training params
     parser.add_argument('--batch_size', type=int, default=24, help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs to train')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.001, help='Weight decay (L2 regularization) to reduce overfitting')
     parser.add_argument('--optimizer', type=str, choices=['sgd', 'adam'], default='adam',
@@ -215,6 +222,12 @@ def parse_args():
                         help='Freeze feature extractor layers and only train attention and classifier (default: True)')
     parser.add_argument('--unfreeze_last_n_layers', type=int, default=0,
                         help='Number of later convolutional blocks to unfreeze (0 means all frozen, -1 means all unfrozen)')
+    parser.add_argument('--use_gradual_unfreezing', action='store_true', default=True,
+                        help='Gradually unfreeze more layers as training progresses')
+    parser.add_argument('--lr_ramp_up', action='store_true', default=True,
+                        help='Gradually increase learning rate with each unfreezing stage')
+    parser.add_argument('--lr_ramp_factor', type=float, default=2.0,
+                        help='Factor to multiply learning rate by with each unfreezing stage')
     parser.add_argument('--train_split', type=float, default=0.8,
                         help='Fraction of data to use for training (vs validation)')
     
@@ -281,6 +294,48 @@ def train_model(model, train_loader, val_loader, optimizer, args):
         'learning_rates': []
     }
     
+    # Prepare gradual unfreezing schedule if enabled
+    if args.use_gradual_unfreezing and args.freeze_features:
+        # Get all convolutional layers
+        conv_layers = []
+        for i, layer in enumerate(model.features):
+            if isinstance(layer, nn.Conv3d):
+                conv_layers.append(i)
+        
+        total_blocks = len(conv_layers)
+        
+        # Determine unfreezing schedule
+        # Start with all layers frozen, then unfreeze later layers first
+        # Distribute unfreezing over epochs
+        unfreeze_schedule = []
+        # First epoch: no unfreezing (just classifier and attention)
+        unfreeze_schedule.append(0)
+        
+        # Distribute remaining unfreezing across epochs 
+        for epoch in range(1, args.epochs):
+            blocks_to_unfreeze = int(np.ceil((epoch / (args.epochs - 1)) * total_blocks)) if args.epochs > 1 else total_blocks
+            unfreeze_schedule.append(blocks_to_unfreeze)
+            
+        print(f"Gradual unfreezing schedule: {unfreeze_schedule}")
+        
+        # If also using learning rate ramping
+        if args.lr_ramp_up:
+            original_lr = args.lr
+            lr_schedule = []
+            
+            for epoch in range(args.epochs):
+                # Ramping factor increases with each unfreezing stage
+                if epoch == 0:
+                    lr_schedule.append(original_lr)
+                else:
+                    ramp_factor = args.lr_ramp_factor ** (epoch / (args.epochs - 1)) if args.epochs > 1 else args.lr_ramp_factor
+                    lr_schedule.append(original_lr * ramp_factor)
+                    
+            print(f"Learning rate schedule: {[f'{lr:.6f}' for lr in lr_schedule]}")
+    else:
+        unfreeze_schedule = None
+        lr_schedule = None
+    
     print(f"\nStarting training for {args.epochs} epochs")
     print(f"Training on {len(train_loader.dataset)} samples, validating on {len(val_loader.dataset)} samples")
     print(f"Batch size: {args.batch_size}, Learning rate: {args.lr}")
@@ -343,7 +398,9 @@ def train_model(model, train_loader, val_loader, optimizer, args):
         vol_max = volume_slice.max()
         
         # Plot volume slice (grayscale) with EXPLICIT vmin/vmax to preserve intensity scale
-        im1 = ax1.imshow(volume_slice, cmap='gray', vmin=vol_min, vmax=vol_max)
+        # Set vmin and vmax to 0-255 range for consistency in visualization
+        display_range = (0, 255)
+        im1 = ax1.imshow(volume_slice, cmap='gray', vmin=display_range[0], vmax=display_range[1])
         ax1.set_title(f"Volume (class: {sample_label}, pred: {sample_prediction})\nRAW range: {vol_min:.1f}-{vol_max:.1f}")
         plt.colorbar(im1, ax=ax1)
         
@@ -370,11 +427,71 @@ def train_model(model, train_loader, val_loader, optimizer, args):
         save_path = os.path.join(args.output_dir, "debug_previews", f"{path_prefix}.png")
         plt.savefig(save_path)
         plt.close(fig)
-        print(f"Saved input preview to {save_path} [RAW intensity range: {vol_min:.1f}-{vol_max:.1f}]")
+        print(f"Saved input preview to {save_path} [RAW intensity range: {vol_min:.1f}-{vol_max:.1f}, Display range: {display_range}]")
     
     for epoch in range(args.epochs):
         epoch_start_time = time.time()
         print(f"\n{'='*20} Epoch {epoch+1}/{args.epochs} {'='*20}")
+        
+        # Apply gradual unfreezing if enabled
+        if args.use_gradual_unfreezing and args.freeze_features and unfreeze_schedule:
+            blocks_to_unfreeze = unfreeze_schedule[epoch]
+            
+            # First freeze all feature extractor layers
+            for param in model.features.parameters():
+                param.requires_grad = False
+            
+            if blocks_to_unfreeze > 0:
+                # Get all convolutional layers
+                conv_layers = []
+                for i, layer in enumerate(model.features):
+                    if isinstance(layer, nn.Conv3d):
+                        conv_layers.append(i)
+                
+                # Start unfreezing from the last layers (specific to this epoch)
+                total_blocks = len(conv_layers)
+                start_idx = max(0, total_blocks - blocks_to_unfreeze)
+                
+                print(f"Epoch {epoch+1}: Unfreezing {blocks_to_unfreeze} of {total_blocks} convolutional blocks")
+                
+                # Unfreeze the specified blocks
+                for i in range(start_idx, len(conv_layers)):
+                    conv_idx = conv_layers[i]
+                    # Unfreeze conv layer
+                    for param in model.features[conv_idx].parameters():
+                        param.requires_grad = True
+                    
+                    # Also unfreeze batch norm
+                    if conv_idx + 1 < len(model.features) and isinstance(model.features[conv_idx + 1], nn.BatchNorm3d):
+                        for param in model.features[conv_idx + 1].parameters():
+                            param.requires_grad = True
+            else:
+                print(f"Epoch {epoch+1}: All feature extractor layers frozen")
+            
+            # Update optimizer with new trainable parameters
+            if args.optimizer == 'sgd':
+                optimizer = optim.SGD(
+                    [p for p in model.parameters() if p.requires_grad], 
+                    lr=args.lr,
+                    weight_decay=args.weight_decay
+                )
+            else:  # adam
+                optimizer = optim.Adam(
+                    [p for p in model.parameters() if p.requires_grad], 
+                    lr=args.lr,
+                    weight_decay=args.weight_decay
+                )
+                
+            # Apply learning rate ramp-up if enabled
+            if args.lr_ramp_up and lr_schedule:
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_schedule[epoch]
+                print(f"Learning rate updated to: {lr_schedule[epoch]:.6f}")
+            
+            # Count trainable parameters
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in model.parameters())
+            print(f"Trainable parameters: {trainable_params:,} / {total_params:,} ({trainable_params/total_params:.2%})")
         
         # Training phase
         model.train()
@@ -655,9 +772,7 @@ def train_model(model, train_loader, val_loader, optimizer, args):
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                    if patience_counter >= args.early_stopping:
-                        print(f"Early stopping after {epoch+1} epochs")
-                        break
+                
             except Exception as e:
                 print(f"ERROR during validation: {e}")
                 import traceback
@@ -747,7 +862,9 @@ def validate_model(model, data_loader, use_mask_attention, use_mask_weighted_los
         vol_max = volume_slice.max()
         
         # Plot volume slice (grayscale) with EXPLICIT vmin/vmax to preserve intensity scale
-        im1 = ax1.imshow(volume_slice, cmap='gray', vmin=vol_min, vmax=vol_max)
+        # Set vmin and vmax to 0-255 range for consistency in visualization
+        display_range = (0, 255)
+        im1 = ax1.imshow(volume_slice, cmap='gray', vmin=display_range[0], vmax=display_range[1])
         ax1.set_title(f"Volume (class: {sample_label}, pred: {sample_prediction})\nRAW range: {vol_min:.1f}-{vol_max:.1f}")
         plt.colorbar(im1, ax=ax1)
         
@@ -774,7 +891,7 @@ def validate_model(model, data_loader, use_mask_attention, use_mask_weighted_los
         save_path = os.path.join(output_dir, "debug_previews", f"{path_prefix}.png")
         plt.savefig(save_path)
         plt.close(fig)
-        print(f"Saved validation preview to {save_path} [RAW intensity range: {vol_min:.1f}-{vol_max:.1f}]")
+        print(f"Saved validation preview to {save_path} [RAW intensity range: {vol_min:.1f}-{vol_max:.1f}, Display range: {display_range}]")
     
     # Ensure model has been initialized
     if not getattr(model, 'initialized', True):

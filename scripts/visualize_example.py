@@ -128,7 +128,6 @@ def main():
             mask_transform=mask_transform,
             class_csv_path=args.class_csv,
             filter_by_class=args.class_id,
-            slice_range=args.slice_range,
             return_paths=True,
             load_volumes=False
         )
@@ -149,8 +148,8 @@ def main():
             filter_by_class=args.class_id,
             return_paths=True,
             load_volumes=True,
-            max_crops_per_volume=args.max_crops,
-            target_size=target_size
+            target_size=target_size,
+            crop_size=(80, 80, 80)
         )
         
         print(f"Created 3D dataloader with {len(dataloader.dataset)} samples")
