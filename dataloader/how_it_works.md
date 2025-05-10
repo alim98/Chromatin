@@ -1,24 +1,28 @@
-Full Sample Tracking:
-Each sample from the CSV file (like "1,Glia,0011") is tracked as a "full sample"
-We store metadata for these full samples in self.sample_metadata
-Subsample/Crop Management:
-Each full sample is virtually divided into multiple 80×80×80 sub-volumes
-We create a mapping from dataset index to (sample_idx, subsample_idx) in self.subsample_mapping
-This allows efficient access to any specific crop from any sample
-Detailed Crop Information:
-Each returned sample now includes metadata about which crop it is and where it came from
-This helps track the origin of predictions in your model
-Memory Efficiency:
-Volumes are only loaded when accessed, not up front
-After processing, volumes are explicitly deleted to free memory
-Better Diagnostics:
-We show how many full samples are found
-We estimate and report the total number of sub-volumes across all samples
-How It Works In Practice
-When the dataset is initialized, it estimates how many crops each sample will yield
-It creates a mapping from dataset indices to specific crops in specific samples
-When __getitem__(idx) is called, it:
-Maps the index to the correct sample and crop
-Loads the full volume if needed
-Extracts just the requested crop
-Returns that specific crop with detailed metadata
+from dataloader.mesh_dataloader import get_mesh_dataloader
+from dataloader.highres_image_dataloader import get_highres_image_dataloader
+from dataloader.lowres_image_dataloader import get_lowres_image_dataloader
+
+# Point cloud dataloader
+mesh_loader = get_mesh_dataloader(
+    root_dir="data/nuclei_sample_1a_v1",
+    class_csv_path="chromatin_classes_and_samples.csv",
+    max_points=10000,
+    cache_dir="data/pointclouds_cache"
+)
+
+# High-res image dataloader
+highres_loader = get_highres_image_dataloader(
+    root_dir="data/nuclei_sample_1a_v1",
+    class_csv_path="chromatin_classes_and_samples.csv",
+    target_size=(224, 224),
+    slices_per_sample=5
+)
+
+# Low-res image dataloader for coarse texture
+lowres_loader = get_lowres_image_dataloader(
+    root_dir="data/nuclei_sample_1a_v1",
+    class_csv_path="chromatin_classes_and_samples.csv",
+    target_size=(64, 64),
+    z_window_size=5,
+    z_stride=3
+)
